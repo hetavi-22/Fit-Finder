@@ -18,8 +18,81 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+import json
+import re
+from tools import search_listings, suggest_outfit, create_fit_card, _get_groq_client
 
+def _parse_query(query: str) -> dict:
+    """
+    Use the Groq LLM to parse a user's natural language search query 
+    into structured search parameters (description, size, max_price).
+    """
+    try:
+        client = _get_groq_client()
+        prompt = (
+            f"Analyze the following clothing search request: \"{query}\"\n\n"
+            f"Extract and return a JSON object with these exact keys:\n"
+            f"- 'description' (str): keywords describing the clothing item itself (e.g., 'vintage graphic tee'). Always extract keywords.\n"
+            f"- 'size' (str or null): the specific size mentioned (e.g., 'M', 'W30', '8'), or null if not specified.\n"
+            f"- 'max_price' (float or null): the price ceiling specified (e.g., 30.0 for 'under $30'), or null if not specified.\n\n"
+            f"Return ONLY valid JSON. Do not include markdown code fences, backticks, or any conversational text."
+        )
+        
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are a precise JSON parser. Output only valid raw JSON, with no explanation or formatting."},
+                {"role": "user", "content": prompt}
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.0,
+        )
+        content = response.choices[0].message.content.strip()
+        
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\n", "", content)
+            content = re.sub(r"\n```$", "", content)
+            
+        parsed = json.loads(content.strip())
+
+        extracted_desc = parsed.get("description", "").strip()
+        if not extracted_desc:
+            extracted_desc = query # fallback to whole query if description is empty
+            
+        return {
+            "description": extracted_desc,
+            "size": parsed.get("size"),
+            "max_price": float(parsed["max_price"]) if parsed.get("max_price") is not None else None
+        }
+        
+    except Exception as e:
+        max_price = None
+        price_match = re.search(r'(?:under|\$)\s*(\d+(?:\.\d+)?)', query.lower())
+        if price_match:
+            max_price = float(price_match.group(1))
+            
+        size = None
+        size_match = re.search(r'\bsize\s+(\w+)\b|\b([SML])\b', query, re.IGNORECASE)
+        if size_match:
+            size = size_match.group(1) or size_match.group(2)
+            if size:
+                size = size.upper()
+                
+        clean_desc = query.lower()
+        clean_desc = re.sub(r'under\s*\$?\s*\d+', '', clean_desc)
+        clean_desc = re.sub(r'\$?under\s*\d+', '', clean_desc)
+        clean_desc = re.sub(r'\$\d+', '', clean_desc)
+        clean_desc = re.sub(r'size\s+\w+', '', clean_desc)
+        clean_desc = re.sub(r'\b(s|m|l|xl|xxs|xs)\b', '', clean_desc)
+        clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
+        
+        if not clean_desc:
+            clean_desc = query
+            
+        return {
+            "description": clean_desc,
+            "size": size,
+            "max_price": max_price
+        }
 
 # ── session state ─────────────────────────────────────────────────────────────
 
@@ -94,7 +167,35 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     """
     # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+    
+    parsed_params = _parse_query(query)
+    session["parsed"] = parsed_params
+    
+    desc = parsed_params.get("description", "")
+    sz = parsed_params.get("size")
+    price = parsed_params.get("max_price")
+    
+    results = search_listings(description=desc, size=sz, max_price=price)
+    session["search_results"] = results
+    
+    if not results:
+        session["error"] = (
+            f"No listings found matching '{desc}'"
+            f"{f' in size {sz}' if sz else ''}"
+            f"{f' under ${price}' if price is not None else ''}. "
+            f"Try loosening your price constraint or removing the size filter!"
+        )
+        return session
+        
+    selected = results[0]
+    session["selected_item"] = selected
+    
+    outfit = suggest_outfit(selected, wardrobe)
+    session["outfit_suggestion"] = outfit
+    
+    fit_card = create_fit_card(outfit, selected)
+    session["fit_card"] = fit_card
+    
     return session
 
 

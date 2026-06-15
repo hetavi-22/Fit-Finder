@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -70,7 +71,53 @@ def search_listings(
     Before writing code, fill in the Tool 1 section of planning.md.
     """
     # Replace this with your implementation
-    return []
+    
+    listings = load_listings()
+    filtered_listings = []
+    
+
+    query_size = size.strip().lower() if size else None
+    for item in listings:
+        # Filter by price
+        if max_price is not None:
+            if item.get("price", 0.0) > max_price:
+                continue
+                
+        # Filter by size
+        if query_size:
+            item_size = item.get("size", "")
+            if not item_size:
+                continue
+            ls = item_size.strip().lower()
+            
+            pattern = r'\b' + re.escape(query_size) + r'\b'
+            if not re.search(pattern, ls):
+                continue
+                
+        filtered_listings.append(item)
+
+    scored_listings = []
+    query_words = set(re.findall(r'[a-z0-9]+', description.lower()))
+    
+    if not query_words:
+        return []
+
+    for item in filtered_listings:
+        title_text = item.get("title", "").lower()
+        desc_text = item.get("description", "").lower()
+        style_tags = [tag.lower() for tag in item.get("style_tags", [])]
+        
+        listing_words = set(re.findall(r'[a-z0-9]+', title_text + " " + desc_text))
+        listing_words.update(style_tags)
+        
+        overlap_score = len(query_words.intersection(listing_words))
+        
+        # Drop any listings with a score of 0
+        if overlap_score > 0:
+            scored_listings.append((overlap_score, item))
+
+    scored_listings.sort(key=lambda x: x[0], reverse=True)
+    return [item for _, item in scored_listings]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -101,7 +148,84 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
     Before writing code, fill in the Tool 2 section of planning.md.
     """
     # Replace this with your implementation
-    return ""
+
+    item_title = new_item.get("title", "Unknown Item")
+    item_category = new_item.get("category", "clothing")
+    item_colors = ", ".join(new_item.get("colors", [])) or "unknown colors"
+    item_tags = ", ".join(new_item.get("style_tags", [])) or "casual"
+    item_desc = new_item.get("description", "")
+    item_details = (
+        f"Item: {item_title}\n"
+        f"Category: {item_category}\n"
+        f"Colors: {item_colors}\n"
+        f"Style tags: {item_tags}\n"
+        f"Description: {item_desc}"
+    )
+    
+    wardrobe_items = wardrobe.get("items", [])
+    
+    if not wardrobe_items:
+        # General styling prompt for empty wardrobe
+        prompt = (
+            f"The user wants styling advice for this newly found piece:\n\n"
+            f"{item_details}\n\n"
+            f"The user's wardrobe is currently empty. Please suggest general outfit "
+            f"combinations, complementary colors, proportions, and style directions "
+            f"that work beautifully for this category of clothing."
+        )
+    else:
+        # Wardrobe has items so format the closet listings
+        wardrobe_list = []
+        for i, item in enumerate(wardrobe_items, 1):
+            w_name = item.get("name", "Unnamed Piece")
+            w_cat = item.get("category", "clothing")
+            w_colors = ", ".join(item.get("colors", []))
+            w_tags = ", ".join(item.get("style_tags", []))
+            w_notes = item.get("notes", "")
+            notes_str = f" (Notes: {w_notes})" if w_notes else ""
+            
+            wardrobe_list.append(
+                f"{i}. {w_name} [{w_cat}] - Colors: {w_colors} | Tags: {w_tags}{notes_str}"
+            )
+        
+        wardrobe_details = "\n".join(wardrobe_list)
+        
+        prompt = (
+            f"The user is considering buying this item:\n\n"
+            f"{item_details}\n\n"
+            f"Here is the user's current closet/wardrobe:\n"
+            f"{wardrobe_details}\n\n"
+            f"Please suggest 1-2 complete, stylized outfits that pair this new item "
+            f"with specific items from their wardrobe. Refer to their wardrobe items "
+            f"explicitly by name. Explain why these combinations work (e.g. color harmony, "
+            f"silhouette, or aesthetic style)."
+        )
+  
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a professional fashion stylist. Give detailed, inspiring outfit suggestions in a helpful tone. Focus on creating stylish outfits.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        fallback_msg = (
+            f"Styling advice for {item_title} ({item_colors}):\n"
+            f"- Since this is a '{item_category}' piece, try pairing it with neutral basics "
+            f"such as high-waisted denim or clean tailored trousers.\n"
+            f"- For colors, work with contrast or stay monochrome. If it's a statement piece, "
+            f"let it be the highlight of the outfit.\n"
+            f"- Complete the look with chunky white sneakers or classic black boots, depending on the vibe."
+        )
+        return fallback_msg
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -134,4 +258,65 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     Before writing code, fill in the Tool 3 section of planning.md.
     """
     # Replace this with your implementation
-    return ""
+    
+    item_title = new_item.get("title", "thrifted find")
+    item_platform = new_item.get("platform", "online")
+    item_price = new_item.get("price", 0.0)
+    item_colors = ", ".join(new_item.get("colors", []))
+    item_tags = ", ".join(new_item.get("style_tags", []))
+    
+    outfit_str = outfit.strip() if outfit else ""
+    
+    if not outfit_str:
+        # Fallback prompt for standalone item caption
+        prompt = (
+            f"Write a short, conversational OOTD caption (1-3 sentences) for a newly thrifted item.\n\n"
+            f"Details of item:\n"
+            f"- Title: {item_title}\n"
+            f"- Price: ${item_price}\n"
+            f"- Platform: {item_platform}\n"
+            f"- Colors: {item_colors}\n"
+            f"- Style: {item_tags}\n\n"
+            f"Guidelines:\n"
+            f"- Mention the exact item name, price, and platform naturally once each.\n"
+            f"- Make it sound authentic, casual, and conversational (use lowercase, brief punctuation, and an emoji or hashtag if it fits the vibe).\n"
+            f"- Do not sound like a store catalog."
+        )
+    else:
+        prompt = (
+            f"Write a short, conversational OOTD caption (1-3 sentences) about styling a newly thrifted item.\n\n"
+            f"Details of item:\n"
+            f"- Title: {item_title}\n"
+            f"- Price: ${item_price}\n"
+            f"- Platform: {item_platform}\n"
+            f"- Colors: {item_colors}\n"
+            f"- Style: {item_tags}\n\n"
+            f"Styling idea: {outfit_str}\n\n"
+            f"Guidelines:\n"
+            f"- Mention the exact item name, price, and platform naturally once each.\n"
+            f"- Capture the outfit styling details in a casual and personal way.\n"
+            f"- Make it sound authentic and conversational (use lowercase, brief punctuation, and an emoji or hashtag if it fits the vibe).\n"
+            f"- Do not sound like a store catalog."
+        )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a social media copywriter specializing in Gen-Z fashion and thrift culture. Write authentic OOTD captions.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.85,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        
+        return (
+            f"secured this {item_title} off {item_platform} for ${item_price} and i'm obsessed! "
+            f"styling it with some clean basics today 🖤✨ #thrifted #ootd"
+        )
+
